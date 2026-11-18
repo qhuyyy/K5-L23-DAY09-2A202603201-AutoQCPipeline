@@ -23,7 +23,65 @@ Gợi ý
 """
 from ..common import ERROR, WARN, Issue, iou_xywh, parse_yolo_line  # noqa: F401
 
+CHECK = "label_format"
+
+
+def _overflow(cx, cy, w, h):
+    """Mức tràn lớn nhất ra ngoài [0,1] trên 4 cạnh (<= 0 nghĩa là nằm trong ảnh)."""
+    return max(0.0 - (cx - w / 2), (cx + w / 2) - 1.0, 0.0 - (cy - h / 2), (cy + h / 2) - 1.0)
+
+
+def check_file(ds, stem, cfg):
+    c = cfg["label_format"]
+    n_cls = len(ds.classes)
+    size = ds.image_size(stem)              # (W, H) hoặc None nếu ảnh không mở được / không có ảnh
+    issues = []
+    seen = []                                # [(số dòng, box)] các dòng hợp lệ trước đó, để bắt DUP_BOX
+
+    def add(sev, code, line, msg, **extra):
+        issues.append(Issue(CHECK, sev, code, stem, msg, line, extra))
+
+    for ln_no, text in ds.read_label_lines(stem) or []:   # số dòng gốc, đã bỏ dòng trống
+        # 1) định dạng: dòng hỏng không được làm chết script
+        try:
+            cls, cx, cy, w, h = parse_yolo_line(text)
+        except ValueError as e:
+            add(ERROR, "BAD_FORMAT", ln_no, f"dòng sai định dạng ({e}): {text.strip()!r}")
+            continue
+        # 2) id lớp
+        if not 0 <= cls < n_cls:
+            add(ERROR, "BAD_CLASS_ID", ln_no, f"id lớp {cls} ngoài 0..{n_cls - 1}", cls=cls)
+            continue
+        # 3) box rỗng
+        if w <= 0 or h <= 0:
+            add(ERROR, "BOX_ZERO", ln_no, f"box rộng/cao <= 0 (w={w}, h={h})")
+            continue
+        box = (cx, cy, w, h)
+        # 4) tràn ảnh (có dung sai)
+        over = _overflow(cx, cy, w, h)
+        if over > c["overflow_tol"]:
+            add(ERROR, "BOX_OUT_OF_IMAGE", ln_no, f"box tràn ảnh {over:.4f}", overflow=round(over, 6))
+        # 5) box lặp: cùng lớp với dòng TRƯỚC, IoU cao -> báo ở dòng sau
+        for prev_no, (pcls, pbox) in seen:
+            if pcls == cls:
+                iou = iou_xywh(pbox, box)
+                if iou > c["dup_box_iou"]:
+                    add(ERROR, "DUP_BOX", ln_no, f"trùng box dòng {prev_no} (IoU {iou:.2f})", iou=round(iou, 4), dup_of=prev_no)
+                    break
+        seen.append((ln_no, (cls, box)))
+        # 6) cảnh báo kích thước
+        if size:
+            W, H = size
+            short = min(w * W, h * H)
+            if short < c["min_box_px"]:
+                add(WARN, "BOX_TINY", ln_no, f"cạnh ngắn {short:.1f}px < {c['min_box_px']}px", short_px=round(short, 2))
+        if w * h > c["max_box_frac"]:
+            add(WARN, "BOX_HUGE", ln_no, f"box chiếm {w * h:.0%} ảnh", frac=round(w * h, 4))
+    return issues
+
 
 def run(ds, cfg):
-    # TODO: duyệt từng file nhãn, từng dòng
-    raise NotImplementedError("check label_format chưa làm")
+    issues = []
+    for lf in ds.label_files():              # ảnh thiếu file nhãn do check missing_labels báo
+        issues.extend(check_file(ds, lf.stem, cfg))
+    return issues
