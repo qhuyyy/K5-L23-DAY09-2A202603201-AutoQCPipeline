@@ -3,6 +3,7 @@
 ## 1. Kết luận trước
 **HOLD** (mã thoát 10). Vào **224** ảnh, cửa vào loại **22**, còn **202** ảnh đi qua QC. Bộ `submission/export/clean_v1/` có 202 ảnh và nhãn, nhưng đây chỉ là **bản nháp để thử nghiệm**, chưa được phát hành.
 Lý do: sau khi máy sửa và người duyệt hết ngân sách 80 ảnh thì không còn lỗi bắt buộc nào (`n_errors = 0`). Tuy vậy vẫn còn **38/202 ảnh (18,8 %)** có cảnh báo mà chưa ai xem, cao hơn ngưỡng 10 % (`08_summary.json`).
+Train thử (mục 5): mAP50 của `clean` là 0.701 ± 0.025, của `raw` là 0.726 ± 0.000. Chênh −0.025 nằm trong độ nhiễu giữa các seed, nên **chưa chứng minh được clean tốt hơn raw**.
 
 ## 2. Lỗi và phân việc
 Lấy từ `02_error_list_v1.csv` (211 dòng trên 224 ảnh) và `03_fixes.csv` (35 thay đổi).
@@ -49,7 +50,24 @@ Kiểm bằng mắt bằng `scripts/viz_labels.py`: `img_0001` có người lín
 3. *Box lỏng nhẹ.* Recall LOOSE_BOX trên calib chỉ 0.20 với box phóng to khoảng 1,5 lần. Trên raw còn 16 ảnh LOOSE_BOX nằm ngoài ngân sách duyệt.
 
 ## 5. Train: raw vs clean (tùy chọn, chấm riêng)
-**Chưa chạy.** Bản này chỉ nộp phần lõi (`make check-core`). Dataset `clean_v1` đã được xuất (bản nháp, vì kết luận là Hold) để có thể train trên Colab sau.
+Cấu hình: `yolo26n.pt`, 20 epoch, imgsz 640, batch 16, Colab T4, **2 seed (0, 1)**. Hai biến thể dùng chung val (`gold_val`, 40 ảnh) và test (100 ảnh). Chỉ khác dữ liệu train: `raw` 224 ảnh với nhãn gốc, `clean` 202 ảnh với nhãn `clean_v1` (`manifest_sha1 ac92681…`, khớp với manifest đã commit). Nhãn `clean_v1` là bản nháp, vì pipeline kết luận Hold.
+Bảng sinh bởi `scripts/summarize_results.py` (`submission/results/comparison.md`):
+
+| biến thể | #ảnh train | số seed | map50 (TB ± độ lệch) | map50_95 (TB ± độ lệch) | precision (TB ± độ lệch) | recall (TB ± độ lệch) |
+|---|---|---|---|---|---|---|
+| raw | 224 | 2 | 0.726 ± 0.000 | 0.512 ± 0.004 | 0.764 ± 0.061 | 0.649 ± 0.028 |
+| clean | 202 | 2 | 0.701 ± 0.025 | 0.487 ± 0.008 | 0.759 ± 0.003 | 0.625 ± 0.019 |
+
+**Chênh lệch so với nhiễu.** mAP50 (clean − raw) = **−0.025**, bằng đúng độ lệch giữa 2 seed của `clean` (0.025). Hai seed của `clean` (0.718 và 0.683) cách nhau 0.035, rộng hơn cả khoảng cách giữa hai biến thể. Seed 0 của `clean` (0.718) chỉ kém `raw` 0.008. mAP50-95 chênh −0.025, lớn hơn độ lệch seed (0.004–0.008), nhưng 2 seed là quá ít để ước lượng nhiễu một cách đáng tin. **Kết luận: chưa đủ bằng chứng để nói clean tốt hơn hay kém hơn raw.** Có nhiều khả năng chênh lệch nằm trong nhiễu, với xu hướng `clean` thấp hơn nhẹ. Thí nghiệm này **không** chứng minh được pipeline cải thiện model.
+
+Theo lớp (AP50, seed 0 / seed 1): car và person gần như bằng nhau (car 0.75/0.72 so với 0.74/0.74; person 0.81/0.83 so với 0.82/0.83). Chênh lệch dồn vào **truck** (raw 0.66/0.64, clean 0.59/0.49), còn bus lẫn lộn (raw 0.68/0.71, clean 0.73/0.68). Test chỉ có 24 box truck và 27 box bus, nên AP của hai lớp này dao động mạnh giữa các seed.
+
+**Giả thuyết và cách kiểm:**
+1. *Rò rỉ test làm `raw` được điểm cao giả.* Pipeline tìm ra 5 ảnh raw trùng ảnh test (LEAK_TEST: `img_0049` = `test_033`, `img_0101`, `img_0167`, `img_0174`, `img_0221`). `raw` đã được train trên chính 5 ảnh đề thi đó, còn `clean` thì không. **Cách kiểm:** chấm lại cả hai model trên 95 ảnh test còn lại (bỏ 5 ảnh bị rò), hoặc train thêm biến thể `raw` bỏ 5 ảnh rò.
+2. *Nhãn `clean` vẫn còn lỗi, và lớp truck nhạy cảm nhất.* 45/125 ảnh trong hàng đợi chưa được người duyệt (16 LOOSE_BOX, 11 FALSE_POS). Truck là lớp ít box (41 box trong `clean`) và hay bị nhầm với car (18 cờ WRONG_CLASS, phần lớn là truck ↔ car). Người duyệt đã đổi nhãn car/truck trên nhiều ảnh: số box car giảm từ 122 xuống 101, truck tăng từ 32 lên 41. Ranh giới truck/car của người duyệt có thể khác của nhãn test, hoặc khác của model. **Cách kiểm:** chạy thêm biến thể `oracle` (cùng ảnh, nhãn người) để có chặn trên, và so AP truck của 3 biến thể.
+3. *Ít ảnh hơn và tập test nhỏ.* `clean` ít hơn 22 ảnh. Phần lớn là ảnh trùng nên không mất thông tin, nhưng vẫn ít lượt cập nhật hơn với 20 epoch. Test chỉ có 100 ảnh, nên mAP nhảy vài phần trăm giữa các seed là bình thường. **Cách kiểm:** chạy thêm seed (≥ 5) để có độ lệch chuẩn đáng tin trước khi kết luận.
+
+**Việc tiếp theo:** chấm lại trên test bỏ 5 ảnh rò, thêm biến thể `oracle`, chạy ≥ 5 seed. Chỉ khi chênh lệch vượt rõ độ lệch giữa các seed mới kết luận clean tốt hay kém hơn raw.
 
 ## 6. Quyết định và ghi chú AI
 **(a)** Quyết định: **Hold**. Không phát hành. Không có lỗi bắt buộc nào, nhưng 38/202 ảnh vẫn còn cảnh báo chưa được người xem. Muốn thành **Release** cần cho người duyệt thêm ít nhất **18 ảnh** trong số 38 ảnh đó (để còn dưới 20/202 < 10 %), theo đúng thứ tự `05_review_queue.csv` (chủ yếu là LOOSE_BOX / FALSE_POS / EMPTY_LABEL). Một cách khác là tăng ngân sách duyệt trong guideline của dự án, chứ không phải nâng `conf` để giấu cảnh báo.
